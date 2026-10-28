@@ -116,7 +116,7 @@ IS_HAIKU = "haiku" in MODEL
 WEB_SEARCH_TOOL = {
     "type": "web_search_20250305" if IS_HAIKU else "web_search_20260209",
     "name": "web_search",
-    "max_uses": 25,
+    "max_uses": 10,  # each search adds a lot of context; too many and the reply gets cut off
 }
 FALLBACK_ARGS = {} if IS_HAIKU else {"betas": ["server-side-fallback-2026-07-01"], "fallbacks": "default"}
 
@@ -146,6 +146,7 @@ def today() -> str:
 async def run_claude(system: str, messages: list[dict], tools: list[dict], effort: str, state: dict) -> str:
     """Run Claude until it finishes, handling web-search pauses and the update_categories tool."""
     messages = list(messages)
+    text = []  # a paused turn resumes where it left off, so keep text from every response
     for _ in range(10):
         response = await client.beta.messages.create(
             model=MODEL,
@@ -156,8 +157,12 @@ async def run_claude(system: str, messages: list[dict], tools: list[dict], effor
             output_config={"effort": effort},
             **FALLBACK_ARGS,
         )
+        log.info("Claude stop_reason=%s input_tokens=%s output_tokens=%s",
+                 response.stop_reason, response.usage.input_tokens, response.usage.output_tokens)
         if response.stop_reason == "refusal":
             return "Sorry, I couldn't answer that one."
+
+        text += [b.text for b in response.content if b.type == "text"]
 
         if response.stop_reason == "pause_turn":
             # Server-side web search hit its loop limit; resend so it resumes.
@@ -165,6 +170,7 @@ async def run_claude(system: str, messages: list[dict], tools: list[dict], effor
             continue
 
         if response.stop_reason == "tool_use":
+            text = []  # the answer comes after the tool result
             messages.append({"role": "assistant", "content": response.content})
             results = []
             for block in response.content:
@@ -181,7 +187,11 @@ async def run_claude(system: str, messages: list[dict], tools: list[dict], effor
             messages.append({"role": "user", "content": results})
             continue
 
-        return "".join(b.text for b in response.content if b.type == "text").strip()
+        reply = "".join(text).strip()
+        if response.stop_reason in ("max_tokens", "model_context_window_exceeded"):
+            log.warning("Reply cut off (%s)", response.stop_reason)
+            reply += "\n\n<i>(Cut off: the reply ran out of room. Try again.)</i>"
+        return reply
     return "Sorry, that took too many steps. Try asking more narrowly."
 
 
