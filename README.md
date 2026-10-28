@@ -32,6 +32,8 @@ Your daily news digest, delivered in Telegram, and a chat you can talk to.
 
 Only your chat ID can use the bot; it ignores everyone else.
 
+The digest is built from free Google News feeds (each category has 1–3 search queries), so it costs only a fraction of a cent of Claude usage. Chat replies still use Claude's web search for details.
+
 ## Optional settings
 
 | Variable | Default |
