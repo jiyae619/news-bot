@@ -150,7 +150,7 @@ async def run_claude(system: str, messages: list[dict], tools: list[dict], effor
     for _ in range(10):
         response = await client.beta.messages.create(
             model=MODEL,
-            max_tokens=16000,
+            max_tokens=21000,  # most the SDK allows without streaming; reasoning counts toward it
             system=system,
             messages=messages,
             tools=tools,
@@ -206,7 +206,7 @@ async def build_digest(state: dict) -> str:
         system="You write a concise, accurate daily news digest.",
         messages=[{"role": "user", "content": prompt}],
         tools=[WEB_SEARCH_TOOL],
-        effort="high",
+        effort="medium",  # "high" spent the whole output budget on reasoning
         state=state,
     )
 
