@@ -26,7 +26,7 @@ Your daily news digest, delivered in Telegram, and a chat you can talk to.
 
 ## Using it
 
-- Digest arrives daily at 7:45am Pacific (items are numbered).
+- Digest arrives weekdays (Monday–Friday) at 7:45am Pacific (items are numbered).
 - Just text it: "more on 4", "add a category for crypto regulation", "drop Fintech", "what's the latest on passkeys?"
 - `/digest` – digest now · `/categories` – list categories · `/reset` – clear chat memory
 

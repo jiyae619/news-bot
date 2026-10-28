@@ -26,6 +26,7 @@ ALLOWED_CHAT_ID = int(os.environ.get("TELEGRAM_CHAT_ID", "0"))  # only this chat
 MODEL = os.environ.get("NEWSBOT_MODEL", "claude-haiku-5-5")
 TZ = ZoneInfo(os.environ.get("NEWSBOT_TZ", "America/Los_Angeles"))
 DIGEST_TIME = dt.time(hour=7, minute=45, tzinfo=TZ)
+DIGEST_DAYS = (1, 2, 3, 4, 5)  # Monday-Friday (0 is Sunday)
 STATE_FILE = Path(os.environ.get("NEWSBOT_STATE", Path(__file__).with_name("state.json")))
 HISTORY_LIMIT = 10  # chat messages kept as context; each one is resent with every message
 
@@ -248,7 +249,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         )
         return
     await update.message.reply_text(
-        "News Watch is on. Your digest arrives daily at 7:45am.\n\n"
+        "News Watch is on. Your digest arrives weekdays at 7:45am.\n\n"
         "Just text me, e.g. \"more on 3\", \"add a category for crypto regulation\", "
         "\"what's new with the EU AI Act?\"\n\n"
         "/digest – send a digest now\n/categories – show your categories\n/reset – clear chat memory"
@@ -331,8 +332,8 @@ def main() -> None:
     app.add_handler(CommandHandler("reset", cmd_reset))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_message))
     if ALLOWED_CHAT_ID:
-        app.job_queue.run_daily(send_digest, time=DIGEST_TIME, name="daily-digest")
-        log.info("Daily digest scheduled at %s %s", DIGEST_TIME.strftime("%H:%M"), TZ)
+        app.job_queue.run_daily(send_digest, time=DIGEST_TIME, days=DIGEST_DAYS, name="daily-digest")
+        log.info("Weekday digest scheduled at %s %s", DIGEST_TIME.strftime("%H:%M"), TZ)
     else:
         log.info("TELEGRAM_CHAT_ID not set: send /start to the bot to get your chat ID.")
     app.run_polling()
