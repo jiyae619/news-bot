@@ -27,7 +27,7 @@ MODEL = os.environ.get("NEWSBOT_MODEL", "claude-haiku-5-5")
 TZ = ZoneInfo(os.environ.get("NEWSBOT_TZ", "America/Los_Angeles"))
 DIGEST_TIME = dt.time(hour=7, minute=45, tzinfo=TZ)
 STATE_FILE = Path(os.environ.get("NEWSBOT_STATE", Path(__file__).with_name("state.json")))
-HISTORY_LIMIT = 20  # chat messages kept as context
+HISTORY_LIMIT = 10  # chat messages kept as context; each one is resent with every message
 
 client = anthropic.AsyncAnthropic()
 
@@ -113,11 +113,10 @@ UPDATE_CATEGORIES_TOOL = {
 
 IS_HAIKU = "haiku" in MODEL
 # Haiku supports only the basic web search tool and has no server-side refusal fallback.
-WEB_SEARCH_TOOL = {
-    "type": "web_search_20250305" if IS_HAIKU else "web_search_20260209",
-    "name": "web_search",
-    "max_uses": 10,  # each search adds a lot of context; too many and the reply gets cut off
-}
+# Each search costs about a cent and adds a lot of input; Haiku input costs 5x more past 100K tokens.
+WEB_SEARCH_TYPE = "web_search_20250305" if IS_HAIKU else "web_search_20260209"
+DIGEST_SEARCH_TOOL = {"type": WEB_SEARCH_TYPE, "name": "web_search", "max_uses": 6}
+CHAT_SEARCH_TOOL = {"type": WEB_SEARCH_TYPE, "name": "web_search", "max_uses": 3}
 FALLBACK_ARGS = {} if IS_HAIKU else {"betas": ["server-side-fallback-2026-07-01"], "fallbacks": "default"}
 
 
@@ -205,7 +204,7 @@ async def build_digest(state: dict) -> str:
     return await run_claude(
         system="You write a concise, accurate daily news digest.",
         messages=[{"role": "user", "content": prompt}],
-        tools=[WEB_SEARCH_TOOL],
+        tools=[DIGEST_SEARCH_TOOL],
         effort="medium",  # "high" spent the whole output budget on reasoning
         state=state,
     )
@@ -309,7 +308,7 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     )
     messages = state["history"] + [{"role": "user", "content": update.message.text}]
     try:
-        reply = await run_claude(system, messages, [WEB_SEARCH_TOOL, UPDATE_CATEGORIES_TOOL], "medium", state)
+        reply = await run_claude(system, messages, [CHAT_SEARCH_TOOL, UPDATE_CATEGORIES_TOOL], "low", state)
     except Exception as e:
         log.exception("chat failed")
         await update.message.reply_text(f"Something went wrong: {e}")
