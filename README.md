@@ -28,23 +28,36 @@ Your daily news digest, delivered in Telegram, and a chat you can talk to.
 
 - Digest arrives weekdays (Monday–Friday) at 7:45am Pacific (items are numbered).
 - Just text it: "more on 4", "add a category for crypto regulation", "drop Fintech", "what's the latest on passkeys?"
-- `/digest` – digest now · `/categories` – list categories · `/reset` – clear chat memory
+- `/digest` – digest now · `/categories` – list categories and blocked sites · `/unblock <site>` – crawl a blocked site again · `/reset` – clear chat memory
 
 Only your chat ID can use the bot; it ignores everyone else.
 
-The digest is built from free Google News feeds: each category has 3–6 broad search queries (synonyms, trade sites, Korean), and Claude Sonnet reads the few hundred headlines they return and picks up to 15 stories by importance, with no quota per category. Posts from social and video platforms (Instagram, X, YouTube, etc.) are dropped before Claude sees them. A digest costs roughly 5–10 cents ($1–2 a month on weekdays); `compare_models.py` measures it. Chat replies still use Claude's web search for details. `/categories` shows each category's searches; ask the bot in chat to change them.
+How the digest is made:
+
+1. **Headlines.** Each category has 3–6 broad Google News searches (synonyms, trade sites, Korean). Posts from social and video platforms (Instagram, X, YouTube, etc.) are dropped.
+2. **Pick (Sonnet, low effort).** Claude Sonnet reads the few hundred headlines and picks about 20 stories by importance, with no quota per category.
+3. **Read.** The bot downloads each picked article and keeps its text.
+4. **Key facts (Sonnet, low effort).** Sonnet reads the articles and writes notes: up to 15 stories, each with facts taken from the article (names and figures copied exactly) and why it matters to you. It leaves out paywall teasers and pages that don't match the headline.
+5. **Write (Haiku).** Claude Haiku writes the digest from those notes only. If it uses a number that isn't in the notes, the bot sends the notes as written instead.
+
+If fewer than 5 articles load, the digest falls back to headlines only and says so.
+
+**Blocked sites.** When a site refuses the download (HTTP 401/402/403/451) or returns no readable article (a paywall, or a page that needs a browser), its stories are left out of future digests. `/categories` lists those sites; `/unblock reuters.com` tries one again. If no article loads at all, nothing is blocked, since the problem is more likely on the bot's side.
+
+A digest costs roughly 10–15 cents ($2–3 a month on weekdays); `compare_models.py` measures it. Chat replies use Claude Haiku with web search. `/categories` shows each category's searches; ask the bot in chat to change them.
 
 ## Optional settings
 
 | Variable | Default |
 |---|---|
-| `NEWSBOT_DIGEST_MODEL` | `claude-sonnet-5-5` (`claude-haiku-5-5` costs about 20x less but picks and explains stories less well) |
+| `NEWSBOT_EDITOR_MODEL` | `claude-sonnet-5-5` (picks stories, pulls key facts from articles) |
+| `NEWSBOT_WRITER_MODEL` | `claude-haiku-5-5` (writes the digest from the editor's notes) |
 | `NEWSBOT_MODEL` | `claude-haiku-5-5` (chat replies) |
 | `NEWSBOT_TZ` | `America/Los_Angeles` |
 | `NEWSBOT_STATE` | `state.json` next to `bot.py` (categories, last digest, chat memory) |
 
 The bot must be running to send the digest and answer you. Your computer works while it's on; for always-on, host it on a small server (e.g. Railway, Render, Fly.io) with the same environment variables.
 
-## Comparing models
+## Comparing digests
 
-`python compare_models.py` fetches today's headlines once, writes a digest with Haiku and with Sonnet from the same headlines, and prints each one's tokens and cost. The digests are saved as `digest-<model>.html` to read side by side. Pass model names to compare others, e.g. `python compare_models.py claude-sonnet-5-5 claude-opus-5-5`. It needs only `ANTHROPIC_API_KEY` and sends nothing to Telegram.
+`python compare_models.py` fetches today's headlines once, then writes the digest two ways from them: from the articles (the steps above) and from headlines alone (Sonnet). It prints each one's tokens and cost per model and saves them as `digest-<name>.html` to read side by side. To compare headline-only digests from other models instead, name them: `python compare_models.py claude-haiku-5-5 claude-sonnet-5-5`. It needs only `ANTHROPIC_API_KEY` and sends nothing to Telegram, but sites that block the download are saved, as in a real digest.
