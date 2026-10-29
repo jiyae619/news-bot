@@ -36,7 +36,7 @@ How the digest is made:
 
 1. **Headlines.** Each category has 3–6 broad Google News searches (synonyms, trade sites, Korean). Posts from social and video platforms (Instagram, X, YouTube, etc.) are dropped.
 2. **Pick (Sonnet, low effort).** Claude Sonnet reads the few hundred headlines and picks about 20 stories by importance. Every category with real news gets at least its top story, and each category is judged by its own description (for South Korea, the biggest stories in Korea, not just ones about identity or AI).
-3. **Read.** The bot downloads each picked article and keeps its text.
+3. **Read.** The bot downloads each picked article and keeps its text. Articles whose page says they're more than 3 days old are left out: Google News sometimes links an old story.
 4. **Key facts (Sonnet, low effort).** Sonnet reads the articles and writes notes: up to 15 stories, each with facts taken from the article (names and figures copied exactly) and why it matters to you. It leaves out paywall teasers and pages that don't match the headline. Picked stories whose articles couldn't be read can still appear, marked *headline only*, with nothing added beyond the headline.
 5. **Write (Haiku).** Claude Haiku writes the digest from those notes only. If it uses a number that isn't in the notes, the bot sends the notes as written instead.
 

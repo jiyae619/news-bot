@@ -50,6 +50,7 @@ PICK_ITEMS = 22  # stories the editor picks from the headlines; some articles wo
 MIN_ARTICLES = 5  # fewer articles than this load: send a headline-only digest instead
 ARTICLE_CHARS = 6000  # article text the editor reads per story (about 1,500 tokens); key facts come first
 MIN_ARTICLE_CHARS = 400  # less readable text than this means a paywall or a page that needs a browser
+MAX_ARTICLE_AGE = dt.timedelta(days=3)  # an article whose page says it's older is an old story: left out
 BLOCK_STATUSES = {401, 402, 403, 451}  # the site refuses the bot: its stories become headline-only from now on
 BROWSER_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_6) AppleWebKit/605.1.15 (KHTML, like Gecko) "
@@ -62,7 +63,7 @@ BLOCKED_DOMAINS = ("instagram.com", "facebook.com", "x.com", "twitter.com", "thr
 
 # Queries cast a wide net (synonyms, trade sites, Korean); Claude then picks stories by meaning.
 # Bump QUERY_VERSION when changing these so saved default categories pick up the new queries.
-QUERY_VERSION = 3
+QUERY_VERSION = 4
 DEFAULT_CATEGORIES = [
     {"name": "Fraud & Risk", "description": "Payment fraud, scams, account takeover, deepfake fraud, risk and fraud-prevention products, notable fraud incidents or enforcement actions.",
      "queries": ['"payment fraud" OR "card fraud" OR scam OR "account takeover"',
@@ -81,8 +82,11 @@ DEFAULT_CATEGORIES = [
      "queries": ['fintech OR neobank OR "digital bank" OR "challenger bank"',
                  '"digital wallet" OR "mobile wallet" OR "payments" launch OR expands',
                  'stablecoin OR "open banking" OR "real-time payments" OR "cross-border payments"',
-                 'site:finextra.com',
-                 'site:pymnts.com']},
+                 # Candidates replacing Finextra and PYMNTS, which block article downloads.
+                 # /categories lists any that turn out to block too.
+                 'site:thepaypers.com',
+                 'site:paymentsdive.com',
+                 'site:fintechnews.ch']},
     {"name": "AI Governance", "description": "AI regulation and policy (EU AI Act, US federal and state, other countries), standards (NIST, ISO 42001), AI safety and Responsible AI news, enforcement and lawsuits.",
      "queries": ['"AI Act" OR "AI regulation" OR "AI law" OR "AI bill"',
                  '"AI safety" OR "responsible AI" OR "AI governance" OR "AI ethics"',
@@ -114,7 +118,7 @@ listed under the wrong category. Judge each one by meaning against the category 
 
 SELECTION_RULES = """- Every category that has real news gets at least its most important story. Beyond that, importance decides: a busy category can have several stories. There is no other quota.
 - Judge importance within each category by its own description, not only by the reader's work. For a general category like South Korea, the biggest stories are the ones that matter most in Korea (national politics, the economy, security), even if they have nothing to do with identity or AI.
-- Put each story in the category it fits best, and never include the same story twice. Several outlets covering one story count as one story: pick the most credible source, preferring one that isn't "[headline only]".
+- Put each story in the category it fits best, and never include the same story twice. Several outlets covering one story count as one story: pick the most credible source, preferring one that isn't "[headline only]". One law, ruling, product launch or incident is one story even when articles cover different angles of it.
 - Skip off-topic items, opinion pieces, press-release fluff and listicles.
 - Skip minor and local stories, including local TV stations and local newspapers, unless the story matters nationally or to the reader's industry. If a local outlet is the only source for a big story, it's fine.
 - Prefer credible primary or trade sources (Reuters, Bloomberg, FT, AP, regulator sites, Biometric Update, Finextra, The Record, Korea Herald, Korea JoongAng Daily, Yonhap, etc.).
@@ -160,8 +164,9 @@ so your notes are the only source of truth: anything you get wrong or add will r
   for a general category like South Korea, the biggest stories in Korea (national politics, the economy, security)
   count even if they have nothing to do with the reader's work.
 - Leave an article out if its text is a paywall teaser, a cookie, login or error page, an unrelated page, or
-  doesn't actually report the story in its headline. If two items cover the same story, keep the better one,
-  preferring an article over a headline-only item.
+  doesn't actually report the story in its headline. If two items cover the same story, keep the more informative
+  one, preferring an article over a headline-only item. One law, ruling, product launch or incident is one story
+  even when the articles cover different angles of it (for example, a law's banned features and its age checks).
 - A headline-only story may be kept if it's important. Its facts list must be empty, its headline must say only
   what the original headline says (in English), and why_it_matters must not add facts.
 - facts: 2-4 short sentences, each stating something the article text says. Copy names, numbers, amounts and
@@ -189,6 +194,7 @@ Accuracy comes first:
   background from memory. You may shorten, combine and reword facts, but never extend them or make them sound
   more certain than the notes do.
 - Keep every number exactly as the notes give it.
+- Write as the digest's author. Never mention the notes, the editor, or how the digest was made.
 
 Digest format:
 - First line: <b>News Watch — {date}</b>
@@ -497,11 +503,15 @@ async def pick_stories(state: dict, items: dict[int, dict], headlines: str, usag
     return [{**items[n], "n": n} for n in numbers]
 
 
-async def fetch_articles(picks: list[dict], state: dict) -> list[dict]:
-    """Fetch each picked story's article text. Sites that refuse the fetch become headline-only from now on."""
+async def fetch_articles(picks: list[dict], state: dict) -> tuple[list[dict], set[int]]:
+    """Fetch each picked story's article text. Returns the articles that loaded and the item numbers of old ones.
+
+    Sites that refuse the fetch become headline-only from now on.
+    """
     picks = [p for p in picks if not p["headline_only"]]  # known to fail: don't ask again
+    stale = set()
     if not picks:
-        return []
+        return [], stale
     async with GoogleDecoderAsync(timeout=15, user_agent=BROWSER_HEADERS["User-Agent"]) as decoder:
         resolved = await decoder.decode_google_news_urls([p["link"] for p in picks], concurrency=4)
     blocked, limit = {}, asyncio.Semaphore(5)
@@ -524,8 +534,13 @@ async def fetch_articles(picks: list[dict], state: dict) -> list[dict]:
         if not resp.is_success:
             log.warning("Article fetch got HTTP %s for %s", resp.status_code, url)
             return None
-        text = await asyncio.to_thread(trafilatura.extract, resp.text, url=url, include_comments=False,
-                                       include_tables=False, favor_precision=True)
+        page = await asyncio.to_thread(trafilatura.bare_extraction, resp.text, url=url, with_metadata=True,
+                                       include_comments=False, include_tables=False, favor_precision=True)
+        text = page.text if page else None
+        if page and page.date and dt.date.fromisoformat(page.date) < dt.date.today() - MAX_ARTICLE_AGE:
+            log.warning("Leaving out %r: the article is dated %s", pick["title"], page.date)
+            stale.add(pick["n"])
+            return None
         if not text or len(text) < MIN_ARTICLE_CHARS:
             blocked[site] = "no readable article text (paywall or needs a browser)"
             return None
@@ -540,7 +555,7 @@ async def fetch_articles(picks: list[dict], state: dict) -> list[dict]:
             state.setdefault("blocked_sites", {})[site] = {"reason": reason, "since": dt.date.today().isoformat()}
         save_state(state)
     log.info("Articles: %d of %d picks loaded", len(articles), len(picks))
-    return articles
+    return articles, stale
 
 
 async def extract_notes(state: dict, articles: list[dict], headline_only: list[dict], usage: dict | None) -> dict:
@@ -615,12 +630,12 @@ def render_notes(notes: dict) -> str:
 async def article_digest(state: dict, items: dict[int, dict], headlines: str, usage: dict | None) -> str | None:
     """Pick stories, read their articles, write the digest from the facts. None if too few articles load."""
     picks = await pick_stories(state, items, headlines, usage)
-    articles = await fetch_articles(picks, state)
+    articles, stale = await fetch_articles(picks, state)
     if len(articles) < MIN_ARTICLES:
         log.warning("Only %d articles loaded", len(articles))
         return None
     loaded = {a["n"] for a in articles}
-    headline_only = [p for p in picks if p["n"] not in loaded]
+    headline_only = [p for p in picks if p["n"] not in loaded | stale]
     notes = await extract_notes(state, articles, headline_only, usage)
     if not any(c["stories"] for c in notes["categories"]):
         return None
