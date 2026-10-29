@@ -11,6 +11,7 @@ import logging
 import os
 import re
 from pathlib import Path
+from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
 
 import anthropic
@@ -25,7 +26,9 @@ log = logging.getLogger("newsbot")
 
 TELEGRAM_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 ALLOWED_CHAT_ID = int(os.environ.get("TELEGRAM_CHAT_ID", "0"))  # only this chat may use the bot
-MODEL = os.environ.get("NEWSBOT_MODEL", "claude-haiku-5-5")
+MODEL = os.environ.get("NEWSBOT_MODEL", "claude-haiku-5-5")  # chat replies
+# The digest is one call a day that has to judge a few hundred headlines; Sonnet does it much better.
+DIGEST_MODEL = os.environ.get("NEWSBOT_DIGEST_MODEL", "claude-sonnet-5-5")
 TZ = ZoneInfo(os.environ.get("NEWSBOT_TZ", "America/Los_Angeles"))
 DIGEST_TIME = dt.time(hour=7, minute=45, tzinfo=TZ)
 DIGEST_DAYS = (1, 2, 3, 4, 5)  # Monday-Friday (0 is Sunday)
@@ -36,12 +39,14 @@ client = anthropic.AsyncAnthropic()
 
 NEWS_FEED_URL = "https://news.google.com/rss/search"
 ITEMS_PER_QUERY = 15  # newest headlines kept from each news feed query
-DIGEST_ITEMS = 15  # stories per digest
-MIN_PER_CATEGORY = 2
+DIGEST_ITEMS = 15  # most stories per digest
+# Social and video platforms: posts, not reporting. Matched against the publisher's domain.
+BLOCKED_DOMAINS = ("instagram.com", "facebook.com", "x.com", "twitter.com", "threads.net", "tiktok.com",
+                   "youtube.com", "linkedin.com", "reddit.com", "pinterest.com")
 
 # Queries cast a wide net (synonyms, trade sites, Korean); Claude then picks stories by meaning.
 # Bump QUERY_VERSION when changing these so saved default categories pick up the new queries.
-QUERY_VERSION = 2
+QUERY_VERSION = 3
 DEFAULT_CATEGORIES = [
     {"name": "Fraud & Risk", "description": "Payment fraud, scams, account takeover, deepfake fraud, risk and fraud-prevention products, notable fraud incidents or enforcement actions.",
      "queries": ['"payment fraud" OR "card fraud" OR scam OR "account takeover"',
@@ -54,7 +59,8 @@ DEFAULT_CATEGORIES = [
                  'biometrics OR "facial recognition" OR "age verification" OR liveness',
                  'passkeys OR passwordless OR authentication OR "identity and access management"',
                  '"AI agents" identity OR "non-human identity" OR "agentic" authentication',
-                 'site:biometricupdate.com']},
+                 'site:biometricupdate.com',
+                 'site:idtechwire.com']},
     {"name": "Fintech", "description": "Product launches, funding and M&A, regulation, and notable moves by fintech companies and banks.",
      "queries": ['fintech OR neobank OR "digital bank" OR "challenger bank"',
                  '"digital wallet" OR "mobile wallet" OR "payments" launch OR expands',
@@ -98,10 +104,11 @@ listed under the wrong category. Judge each one by meaning against the category 
 </news>
 
 Choosing stories:
-- Pick the {total} most important and relevant stories in total (fewer only if there aren't that many worth including).
-- Include at least {min_per} stories for every category that has relevant news; give the remaining slots to the most important stories overall.
+- Pick at most {total} stories in total: the most important and relevant ones. Fewer is fine if there aren't that many worth including. Never go over {total}.
+- Let importance decide how many stories each category gets. A busy category can have several, a quiet one a single story or none. There is no quota per category.
 - Put each story in the category it fits best, and never include the same story twice. Several outlets covering one story count as one story: pick the most credible source.
-- Skip off-topic items, minor or local stories, opinion pieces, press-release fluff and listicles.
+- Skip off-topic items, opinion pieces, press-release fluff and listicles.
+- Skip minor and local stories, including local TV stations and local newspapers, unless the story matters nationally or to the reader's industry. If a local outlet is the only source for a big story, it's fine.
 - Prefer credible primary or trade sources (Reuters, Bloomberg, FT, AP, regulator sites, Biometric Update, Finextra, The Record, Korea Herald, Korea JoongAng Daily, Yonhap, etc.).
 - Use only the items above, never stories from memory. You only have headlines, so say what happened plainly and don't invent details.
 
@@ -149,7 +156,7 @@ UPDATE_CATEGORIES_TOOL = {
                         "queries": {
                             "type": "array",
                             "items": {"type": "string"},
-                            "description": "3-5 broad Google News search queries for this category: synonyms joined with OR, quoted phrases, or site:domain for a trade publication. Cast a wide net: you pick the relevant stories later. Write a query in Korean to get Korean-language news.",
+                            "description": "3-6 broad Google News search queries for this category: synonyms joined with OR, quoted phrases, or site:domain for a trade publication. Cast a wide net: you pick the relevant stories later. Write a query in Korean to get Korean-language news.",
                         },
                     },
                     "required": ["name", "description", "queries"],
@@ -162,12 +169,14 @@ UPDATE_CATEGORIES_TOOL = {
     },
 }
 
-IS_HAIKU = "haiku" in MODEL
 # Haiku supports only the basic web search tool and has no server-side refusal fallback.
 # Each search costs about a cent and adds a lot of input, so the digest reads free news feeds instead.
-WEB_SEARCH_TYPE = "web_search_20250305" if IS_HAIKU else "web_search_20260209"
+WEB_SEARCH_TYPE = "web_search_20250305" if "haiku" in MODEL else "web_search_20260209"
 CHAT_SEARCH_TOOL = {"type": WEB_SEARCH_TYPE, "name": "web_search", "max_uses": 3}
-FALLBACK_ARGS = {} if IS_HAIKU else {"betas": ["server-side-fallback-2026-07-01"], "fallbacks": "default"}
+
+
+def fallback_args(model: str) -> dict:
+    return {} if "haiku" in model else {"betas": ["server-side-fallback-2026-07-01"], "fallbacks": "default"}
 
 
 # ---------- state ----------
@@ -199,22 +208,29 @@ def today() -> str:
 
 # ---------- Claude ----------
 
-async def run_claude(system: str, messages: list[dict], tools: list[dict], effort: str, state: dict) -> str:
-    """Run Claude until it finishes, handling web-search pauses and the update_categories tool."""
+async def run_claude(system: str, messages: list[dict], tools: list[dict], effort: str, state: dict,
+                     model: str = MODEL, usage: dict | None = None) -> str:
+    """Run Claude until it finishes, handling web-search pauses and the update_categories tool.
+
+    If usage is given, the input and output tokens of every call are added to it.
+    """
     messages = list(messages)
     text = []  # a paused turn resumes where it left off, so keep text from every response
     for _ in range(10):
         response = await client.beta.messages.create(
-            model=MODEL,
+            model=model,
             max_tokens=21000,  # most the SDK allows without streaming; reasoning counts toward it
             system=system,
             messages=messages,
             **({"tools": tools} if tools else {}),
             output_config={"effort": effort},
-            **FALLBACK_ARGS,
+            **fallback_args(model),
         )
-        log.info("Claude stop_reason=%s input_tokens=%s output_tokens=%s",
+        log.info("Claude %s stop_reason=%s input_tokens=%s output_tokens=%s", model,
                  response.stop_reason, response.usage.input_tokens, response.usage.output_tokens)
+        if usage is not None:
+            usage["input_tokens"] = usage.get("input_tokens", 0) + response.usage.input_tokens
+            usage["output_tokens"] = usage.get("output_tokens", 0) + response.usage.output_tokens
         if response.stop_reason == "refusal":
             return "Sorry, I couldn't answer that one."
 
@@ -277,6 +293,8 @@ async def fetch_news(categories: list[dict]) -> list[tuple[str, list[dict]]]:
                     if published and dt.datetime(*published[:6], tzinfo=dt.timezone.utc) < cutoff:
                         continue
                     source = entry.get("source", {}).get("title", "")
+                    if blocked_source(entry.get("source", {}).get("href", "")):
+                        continue
                     title = entry.get("title", "").removesuffix(f" - {source}").strip()
                     if not title or not entry.get("link") or title.lower() in seen:
                         continue
@@ -287,6 +305,11 @@ async def fetch_news(categories: list[dict]) -> list[tuple[str, list[dict]]]:
     return news
 
 
+def blocked_source(url: str) -> bool:
+    host = (urlparse(url).hostname or "").removeprefix("www.")
+    return any(host == d or host.endswith("." + d) for d in BLOCKED_DOMAINS)
+
+
 def link_items(text: str, links: dict[int, str]) -> str:
     """Swap the item:N placeholders Claude writes for the real article links."""
     def replace(m: re.Match) -> str:
@@ -295,7 +318,8 @@ def link_items(text: str, links: dict[int, str]) -> str:
     return re.sub(r'<a href="item:(\d+)">(.*?)</a>', replace, text)
 
 
-async def build_digest(state: dict) -> str:
+async def digest_prompt(state: dict) -> tuple[str, dict[int, str]]:
+    """Fetch the headlines and write the digest prompt. Returns the prompt and each item number's link."""
     # Number the headlines instead of showing links: Google News links are long, and
     # this way every link in the digest is a real one from the feeds.
     links, lines = {}, []
@@ -310,18 +334,32 @@ async def build_digest(state: dict) -> str:
         categories=format_categories(state["categories"]),
         news="\n".join(lines),
         total=DIGEST_ITEMS,
-        min_per=MIN_PER_CATEGORY,
         date=today(),
         format_rules=FORMAT_RULES,
     )
+    return prompt, links
+
+
+async def write_digest(prompt: str, links: dict[int, str], state: dict,
+                       model: str = DIGEST_MODEL, usage: dict | None = None) -> str:
     digest = await run_claude(
         system="You are a sharp news editor writing a concise, accurate daily digest.",
         messages=[{"role": "user", "content": prompt}],
         tools=[],
         effort="medium",  # "high" spent the whole output budget on reasoning
         state=state,
+        model=model,
+        usage=usage,
     )
+    stories = len(re.findall(r'<a href="item:\d+">', digest))
+    if stories > DIGEST_ITEMS:
+        log.warning("Digest has %d stories, more than the %d asked for", stories, DIGEST_ITEMS)
     return link_items(digest, links)
+
+
+async def build_digest(state: dict) -> str:
+    prompt, links = await digest_prompt(state)
+    return await write_digest(prompt, links, state)
 
 
 # ---------- Telegram ----------

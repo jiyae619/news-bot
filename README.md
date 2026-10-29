@@ -32,14 +32,19 @@ Your daily news digest, delivered in Telegram, and a chat you can talk to.
 
 Only your chat ID can use the bot; it ignores everyone else.
 
-The digest is built from free Google News feeds: each category has 3–5 broad search queries (synonyms, trade sites, Korean), and Claude reads the few hundred headlines they return and picks the 15 most relevant stories, at least 2 per category. That costs about a tenth of a cent per digest. Chat replies still use Claude's web search for details. `/categories` shows each category's searches; ask the bot in chat to change them.
+The digest is built from free Google News feeds: each category has 3–6 broad search queries (synonyms, trade sites, Korean), and Claude Sonnet reads the few hundred headlines they return and picks up to 15 stories by importance, with no quota per category. Posts from social and video platforms (Instagram, X, YouTube, etc.) are dropped before Claude sees them. A digest costs roughly 5–10 cents ($1–2 a month on weekdays); `compare_models.py` measures it. Chat replies still use Claude's web search for details. `/categories` shows each category's searches; ask the bot in chat to change them.
 
 ## Optional settings
 
 | Variable | Default |
 |---|---|
-| `NEWSBOT_MODEL` | `claude-haiku-5-5` (cheapest; `claude-sonnet-5-5` or `claude-opus-5-5` for higher-quality digests) |
+| `NEWSBOT_DIGEST_MODEL` | `claude-sonnet-5-5` (`claude-haiku-5-5` costs about 20x less but picks and explains stories less well) |
+| `NEWSBOT_MODEL` | `claude-haiku-5-5` (chat replies) |
 | `NEWSBOT_TZ` | `America/Los_Angeles` |
 | `NEWSBOT_STATE` | `state.json` next to `bot.py` (categories, last digest, chat memory) |
 
 The bot must be running to send the digest and answer you. Your computer works while it's on; for always-on, host it on a small server (e.g. Railway, Render, Fly.io) with the same environment variables.
+
+## Comparing models
+
+`python compare_models.py` fetches today's headlines once, writes a digest with Haiku and with Sonnet from the same headlines, and prints each one's tokens and cost. The digests are saved as `digest-<model>.html` to read side by side. Pass model names to compare others, e.g. `python compare_models.py claude-sonnet-5-5 claude-opus-5-5`. It needs only `ANTHROPIC_API_KEY` and sends nothing to Telegram.
