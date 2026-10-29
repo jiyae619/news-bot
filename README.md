@@ -35,14 +35,14 @@ Only your chat ID can use the bot; it ignores everyone else.
 How the digest is made:
 
 1. **Headlines.** Each category has 3–6 broad Google News searches (synonyms, trade sites, Korean). Posts from social and video platforms (Instagram, X, YouTube, etc.) are dropped.
-2. **Pick (Sonnet, low effort).** Claude Sonnet reads the few hundred headlines and picks about 20 stories by importance, with no quota per category.
+2. **Pick (Sonnet, low effort).** Claude Sonnet reads the few hundred headlines and picks about 20 stories by importance. Every category with real news gets at least its top story, and each category is judged by its own description (for South Korea, the biggest stories in Korea, not just ones about identity or AI).
 3. **Read.** The bot downloads each picked article and keeps its text.
-4. **Key facts (Sonnet, low effort).** Sonnet reads the articles and writes notes: up to 15 stories, each with facts taken from the article (names and figures copied exactly) and why it matters to you. It leaves out paywall teasers and pages that don't match the headline.
+4. **Key facts (Sonnet, low effort).** Sonnet reads the articles and writes notes: up to 15 stories, each with facts taken from the article (names and figures copied exactly) and why it matters to you. It leaves out paywall teasers and pages that don't match the headline. Picked stories whose articles couldn't be read can still appear, marked *headline only*, with nothing added beyond the headline.
 5. **Write (Haiku).** Claude Haiku writes the digest from those notes only. If it uses a number that isn't in the notes, the bot sends the notes as written instead.
 
 If fewer than 5 articles load, the digest falls back to headlines only and says so.
 
-**Blocked sites.** When a site refuses the download (HTTP 401/402/403/451) or returns no readable article (a paywall, or a page that needs a browser), its stories are left out of future digests. `/categories` lists those sites; `/unblock reuters.com` tries one again. If no article loads at all, nothing is blocked, since the problem is more likely on the bot's side.
+**Blocked sites.** When a site refuses the download (HTTP 401/402/403/451) or returns no readable article (a paywall, or a page that needs a browser), the bot stops trying to download it. Its stories can still be picked, and appear as *headline only*. `/categories` lists those sites; `/unblock reuters.com` tries reading one again. If no article loads at all, nothing is blocked, since the problem is more likely on the bot's side.
 
 A digest costs roughly 10–15 cents ($2–3 a month on weekdays); `compare_models.py` measures it. Chat replies use Claude Haiku with web search. `/categories` shows each category's searches; ask the bot in chat to change them.
 
