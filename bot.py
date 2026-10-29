@@ -35,19 +35,44 @@ HISTORY_LIMIT = 10  # chat messages kept as context; each one is resent with eve
 client = anthropic.AsyncAnthropic()
 
 NEWS_FEED_URL = "https://news.google.com/rss/search"
-ITEMS_PER_QUERY = 10  # newest headlines kept from each news feed query
+ITEMS_PER_QUERY = 15  # newest headlines kept from each news feed query
+DIGEST_ITEMS = 15  # stories per digest
+MIN_PER_CATEGORY = 2
 
+# Queries cast a wide net (synonyms, trade sites, Korean); Claude then picks stories by meaning.
+# Bump QUERY_VERSION when changing these so saved default categories pick up the new queries.
+QUERY_VERSION = 2
 DEFAULT_CATEGORIES = [
     {"name": "Fraud & Risk", "description": "Payment fraud, scams, account takeover, deepfake fraud, risk and fraud-prevention products, notable fraud incidents or enforcement actions.",
-     "queries": ['"payment fraud" OR scam OR "account takeover"', '"deepfake fraud" OR "fraud prevention"']},
+     "queries": ['"payment fraud" OR "card fraud" OR scam OR "account takeover"',
+                 'deepfake fraud OR "synthetic identity" OR "money mule" OR "authorized push payment"',
+                 '"fraud prevention" OR "fraud detection" OR "financial crime" OR AML',
+                 'fraud fine OR settlement OR charged OR FTC OR CFPB OR FCA',
+                 '보이스피싱 OR 금융사기 OR 개인정보 유출']},
     {"name": "Identity", "description": "Identity verification, biometrics, digital ID and wallets, authentication, passkeys, non-human and AI agent identity, IAM.",
-     "queries": ['"identity verification" OR biometrics OR "digital ID"', 'passkeys OR "AI agent identity" OR "identity and access management"']},
+     "queries": ['"identity verification" OR "digital identity" OR "digital ID" OR eIDAS',
+                 'biometrics OR "facial recognition" OR "age verification" OR liveness',
+                 'passkeys OR passwordless OR authentication OR "identity and access management"',
+                 '"AI agents" identity OR "non-human identity" OR "agentic" authentication',
+                 'site:biometricupdate.com']},
     {"name": "Fintech", "description": "Product launches, funding and M&A, regulation, and notable moves by fintech companies and banks.",
-     "queries": ['fintech funding OR acquisition OR launch', 'fintech regulation OR neobank']},
+     "queries": ['fintech OR neobank OR "digital bank" OR "challenger bank"',
+                 '"digital wallet" OR "mobile wallet" OR "payments" launch OR expands',
+                 'stablecoin OR "open banking" OR "real-time payments" OR "cross-border payments"',
+                 'site:finextra.com',
+                 'site:pymnts.com']},
     {"name": "AI Governance", "description": "AI regulation and policy (EU AI Act, US federal and state, other countries), standards (NIST, ISO 42001), AI safety and Responsible AI news, enforcement and lawsuits.",
-     "queries": ['"AI Act" OR "AI regulation" OR "AI policy"', '"AI safety" OR "responsible AI" OR "AI lawsuit"']},
+     "queries": ['"AI Act" OR "AI regulation" OR "AI law" OR "AI bill"',
+                 '"AI safety" OR "responsible AI" OR "AI governance" OR "AI ethics"',
+                 'AI lawsuit OR copyright OR "AI compliance" OR regulator',
+                 'NIST AI OR "ISO 42001" OR "AI standards" OR "AI audit"',
+                 '인공지능 기본법 OR AI 규제 OR AI 거버넌스 OR AI 컴플라이언스']},
     {"name": "South Korea", "description": "The day's biggest South Korean stories across politics, economy, business, society, tech, and international relations. Search in both English and Korean.",
-     "queries": ['"South Korea"', '한국 경제 OR 정치 OR 사회']},
+     "queries": ['"South Korea" OR Seoul OR Korean',
+                 'site:koreaherald.com',
+                 'site:en.yna.co.kr',
+                 '한국 경제 OR 증시 OR 수출 OR 반도체',
+                 '정부 OR 국회 OR 대통령 OR 외교']},
 ]
 DEFAULT_QUERIES = {c["name"]: c["queries"] for c in DEFAULT_CATEGORIES}
 
@@ -65,23 +90,26 @@ DIGEST_PROMPT = """{profile}
 Write today's digest for these categories:
 {categories}
 
-Below are news headlines from the last 24 hours, grouped by category. Each line is: headline (source) link.
+Below are candidate news headlines from the last 24 hours. Each line is: [number] headline (source).
+They were gathered with broad keyword searches, so many are off-topic or minor, and a story may be
+listed under the wrong category. Judge each one by meaning against the category descriptions and the reader's work.
 <news>
 {news}
 </news>
 
-Rules:
-- Use only the items above. Never add stories from memory, and use each item's link exactly as given.
-- You only have headlines, so say what happened plainly and don't invent details the headline doesn't give.
-- Skip duplicate coverage of the same story (pick the most credible source), off-topic items, press-release fluff and listicles.
-- Maximum 5 items per category. Fewer is fine; if nothing is worth noting, write "Nothing notable today."
+Choosing stories:
+- Pick the {total} most important and relevant stories in total (fewer only if there aren't that many worth including).
+- Include at least {min_per} stories for every category that has relevant news; give the remaining slots to the most important stories overall.
+- Put each story in the category it fits best, and never include the same story twice. Several outlets covering one story count as one story: pick the most credible source.
+- Skip off-topic items, minor or local stories, opinion pieces, press-release fluff and listicles.
 - Prefer credible primary or trade sources (Reuters, Bloomberg, FT, AP, regulator sites, Biometric Update, Finextra, The Record, Korea Herald, Korea JoongAng Daily, Yonhap, etc.).
+- Use only the items above, never stories from memory. You only have headlines, so say what happened plainly and don't invent details.
 
 Digest format:
 - First line: <b>News Watch — {date}</b>
-- For each category: a bold category name, then numbered items. Number items continuously across the whole digest (1, 2, 3...) so the reader can say "more on 7".
-- Each item: <b>Headline</b> (Source) — one plain sentence on why it matters to the reader, then <a href="URL">Read more</a>. Write Korean headlines in English.
-- End with a short <b>Worth a closer look</b> list of the 2–3 most important items.
+- For each category: a bold category name, then its stories, most important first. Number stories continuously across the whole digest (1, 2, 3...) so the reader can say "more on 7". If a category has nothing relevant, write "Nothing notable today."
+- Each story: <b>Headline</b> (Source) — one plain sentence on why it matters to the reader, then <a href="item:N">Read more</a>, where N is the story's [number] above. Write Korean headlines in English.
+- End with a short <b>Worth a closer look</b> list of the 2–3 most important stories.
 - Output only the digest, nothing before or after it.
 
 {format_rules}"""
@@ -121,7 +149,7 @@ UPDATE_CATEGORIES_TOOL = {
                         "queries": {
                             "type": "array",
                             "items": {"type": "string"},
-                            "description": "1-3 short Google News search queries for this category: keywords, quoted phrases and OR. Write a query in Korean to get Korean-language news.",
+                            "description": "3-5 broad Google News search queries for this category: synonyms joined with OR, quoted phrases, or site:domain for a trade publication. Cast a wide net: you pick the relevant stories later. Write a query in Korean to get Korean-language news.",
                         },
                     },
                     "required": ["name", "description", "queries"],
@@ -146,10 +174,14 @@ FALLBACK_ARGS = {} if IS_HAIKU else {"betas": ["server-side-fallback-2026-07-01"
 
 def load_state() -> dict:
     if not STATE_FILE.exists():
-        return {"categories": DEFAULT_CATEGORIES, "last_digest": "", "history": []}
+        return {"categories": DEFAULT_CATEGORIES, "last_digest": "", "history": [], "query_version": QUERY_VERSION}
     state = json.loads(STATE_FILE.read_text())
-    for c in state["categories"]:  # categories saved before news feeds had no queries
-        c.setdefault("queries", DEFAULT_QUERIES.get(c["name"], [c["name"]]))
+    upgrade = state.get("query_version", 1) < QUERY_VERSION
+    for c in state["categories"]:
+        if upgrade and c["name"] in DEFAULT_QUERIES:
+            c["queries"] = DEFAULT_QUERIES[c["name"]]
+        c.setdefault("queries", [c["name"]])
+    state["query_version"] = QUERY_VERSION
     return state
 
 
@@ -225,14 +257,14 @@ def feed_params(query: str) -> dict:
     return {"q": f"{query} when:1d", "hl": hl, "gl": gl, "ceid": f"{gl}:{lang}"}
 
 
-async def fetch_news(categories: list[dict]) -> str:
+async def fetch_news(categories: list[dict]) -> list[tuple[str, list[dict]]]:
     """Collect the last day's headlines for each category from Google News feeds (free, no key)."""
     cutoff = dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=26)
-    sections = []
+    news, seen = [], set()  # seen spans categories: queries overlap
     async with httpx.AsyncClient(timeout=20, follow_redirects=True,
                                  headers={"User-Agent": "Mozilla/5.0 (NewsWatch bot)"}) as http:
         for c in categories:
-            lines, seen = [], set()
+            items = []
             for query in c.get("queries") or [c["name"]]:
                 try:
                     resp = await http.get(NEWS_FEED_URL, params=feed_params(query))
@@ -246,30 +278,50 @@ async def fetch_news(categories: list[dict]) -> str:
                         continue
                     source = entry.get("source", {}).get("title", "")
                     title = entry.get("title", "").removesuffix(f" - {source}").strip()
-                    if not title or title.lower() in seen:
+                    if not title or not entry.get("link") or title.lower() in seen:
                         continue
                     seen.add(title.lower())
-                    lines.append(f"- {title} ({source or 'unknown source'}) {entry.get('link', '')}")
-            log.info("News feeds: %d headlines for %s", len(lines), c["name"])
-            sections.append(f"{c['name']}:\n" + ("\n".join(lines) or "(no headlines found)"))
-    return "\n\n".join(sections)
+                    items.append({"title": title, "source": source or "unknown source", "link": entry["link"]})
+            log.info("News feeds: %d headlines for %s", len(items), c["name"])
+            news.append((c["name"], items))
+    return news
+
+
+def link_items(text: str, links: dict[int, str]) -> str:
+    """Swap the item:N placeholders Claude writes for the real article links."""
+    def replace(m: re.Match) -> str:
+        url = links.get(int(m.group(1)))
+        return f'<a href="{html.escape(url)}">{m.group(2)}</a>' if url else m.group(2)
+    return re.sub(r'<a href="item:(\d+)">(.*?)</a>', replace, text)
 
 
 async def build_digest(state: dict) -> str:
+    # Number the headlines instead of showing links: Google News links are long, and
+    # this way every link in the digest is a real one from the feeds.
+    links, lines = {}, []
+    for name, items in await fetch_news(state["categories"]):
+        lines.append(f"{name}:")
+        for item in items:
+            links[len(links) + 1] = item["link"]
+            lines.append(f"[{len(links)}] {item['title']} ({item['source']})")
+        lines.append("" if items else "(no headlines found)\n")
     prompt = DIGEST_PROMPT.format(
         profile=PROFILE,
         categories=format_categories(state["categories"]),
-        news=await fetch_news(state["categories"]),
+        news="\n".join(lines),
+        total=DIGEST_ITEMS,
+        min_per=MIN_PER_CATEGORY,
         date=today(),
         format_rules=FORMAT_RULES,
     )
-    return await run_claude(
-        system="You write a concise, accurate daily news digest.",
+    digest = await run_claude(
+        system="You are a sharp news editor writing a concise, accurate daily digest.",
         messages=[{"role": "user", "content": prompt}],
         tools=[],
         effort="medium",  # "high" spent the whole output budget on reasoning
         state=state,
     )
+    return link_items(digest, links)
 
 
 # ---------- Telegram ----------
@@ -321,7 +373,9 @@ async def cmd_categories(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if not allowed(update):
         return
     state = load_state()
-    await update.message.reply_text(format_categories(state["categories"]))
+    text = "\n\n".join(f"{i}. {c['name']}: {c['description']}\nSearches: " + " | ".join(c["queries"])
+                       for i, c in enumerate(state["categories"], 1))
+    await update.message.reply_text(text)
 
 
 async def cmd_reset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
